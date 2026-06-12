@@ -49,6 +49,7 @@ const TARGET_ECTS = 240;
 const STORAGE_KEYS = {
   COURSES: '@gta_foititis_courses_v1',
   PINS: '@gta_foititis_pins_v1',
+  BALANCE: '@gta_foititis_balance_v1',
 };
 
 // Centered on Athens — Syntagma-ish, wide enough to cover NKUA & the center.
@@ -269,12 +270,76 @@ const CourseRow = React.memo(function CourseRow({ course, onDelete }) {
 });
 
 /* ------------------------------------------------------------------ */
+/*  FINANCE PANEL                                                      */
+/* ------------------------------------------------------------------ */
+
+function BalanceModal({ visible, onClose, onSetBalance }) {
+  const [text, setText] = useState('');
+
+  const handleSet = useCallback(() => {
+    const amount = parseFloat(text.replace(',', '.').replace(/[^0-9.]/g, ''));
+    if (!Number.isFinite(amount) || amount < 0) {
+      Alert.alert('MISSION FAILED', 'Enter a valid amount, fool.');
+      return;
+    }
+    Keyboard.dismiss();
+    onSetBalance(amount);
+    setText('');
+    onClose();
+  }, [text, onSetBalance, onClose]);
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <KeyboardAvoidingView
+        style={styles.modalBackdrop}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View style={styles.modalPanel}>
+          <Text style={styles.modalTitle}>UPDATE FUNDS</Text>
+          <TextInput
+            style={[styles.input, styles.modalInput]}
+            placeholder="ENTER AMOUNT"
+            placeholderTextColor={COLORS.textDim}
+            value={text}
+            onChangeText={setText}
+            keyboardType="decimal-pad"
+            autoFocus
+            returnKeyType="done"
+            onSubmitEditing={handleSet}
+          />
+          <View style={styles.modalButtonRow}>
+            <TouchableOpacity
+              style={[styles.modalButton, styles.modalButtonCancel]}
+              onPress={onClose}
+            >
+              <Text style={styles.modalButtonCancelText}>CANCEL</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalButton, styles.modalButtonSave]}
+              onPress={handleSet}
+            >
+              <Text style={styles.modalButtonSaveText}>CONFIRM</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  TRACKER SCREEN                                                     */
 /* ------------------------------------------------------------------ */
 
-function TrackerScreen({ courses, onAddCourse, onDeleteCourse }) {
+function TrackerScreen({ courses, onAddCourse, onDeleteCourse, balance, onSetBalance }) {
   const [name, setName] = useState('');
   const [ectsText, setEctsText] = useState('');
+  const [balanceVisible, setBalanceVisible] = useState(false);
 
   const totalEcts = useMemo(
     () => courses.reduce((sum, c) => sum + c.ects, 0),
@@ -282,9 +347,13 @@ function TrackerScreen({ courses, onAddCourse, onDeleteCourse }) {
   );
   const remaining = Math.max(0, TARGET_ECTS - totalEcts);
   const isComplete = remaining === 0;
-  // Average course at DIT is worth ~6–8 ECTS.
   const minLessons = Math.ceil(remaining / 8);
   const maxLessons = Math.ceil(remaining / 6);
+
+  const formattedBalance = balance.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 
   const handleAdd = useCallback(() => {
     const trimmedName = name.trim();
@@ -337,39 +406,44 @@ function TrackerScreen({ courses, onAddCourse, onDeleteCourse }) {
       {/* HUD header */}
       <View style={styles.hudPanel}>
         <View style={styles.hudTopRow}>
-          <Text style={styles.hudTitle}>NKUA · DIT</Text>
-          <Text style={styles.hudMoney}>
-            €CTS {String(totalEcts).padStart(3, '0')}
-          </Text>
+          <View>
+            <Text style={styles.hudTitle}>NKUA · DIT</Text>
+            <Text style={styles.hudSubtitle}>INFORMATICS & TELECOM</Text>
+          </View>
+          <TouchableOpacity
+            style={styles.hudBalanceTap}
+            onPress={() => setBalanceVisible(true)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.hudCashLabel}>CASH ▸</Text>
+            <Text style={styles.hudMoney}>€{formattedBalance}</Text>
+          </TouchableOpacity>
         </View>
 
         <HudBar totalEcts={totalEcts} />
 
-        <View style={styles.hudStatsRow}>
-          <View style={styles.hudStatBox}>
-            <Text style={styles.hudStatValue}>{remaining}</Text>
-            <Text style={styles.hudStatLabel}>ECTS REMAINING</Text>
-          </View>
-          <View style={styles.hudStatBox}>
-            <Text style={styles.hudStatValue}>
-              {isComplete ? '0' : `${minLessons}–${maxLessons}`}
-            </Text>
-            <Text style={styles.hudStatLabel}>MISSIONS LEFT (≈6–8 ECTS)</Text>
-          </View>
+        <View style={styles.hudFooterRow}>
+          <Text style={styles.hudFooterStat}>
+            <Text style={styles.hudFooterValue}>{remaining}</Text>
+            {' ECTS LEFT'}
+          </Text>
+          {!isComplete ? (
+            <>
+              <Text style={styles.hudFooterDot}>·</Text>
+              <Text style={styles.hudFooterStat}>
+                {'~'}<Text style={styles.hudFooterValue}>{minLessons}–{maxLessons}</Text>
+                {' COURSES'}
+              </Text>
+            </>
+          ) : (
+            <Text style={styles.hudCompleteTag}>· GAME COMPLETE ✓</Text>
+          )}
         </View>
-
-        {isComplete && (
-          <View style={styles.completeBanner}>
-            <Text style={styles.completeBannerText}>
-              GAME COMPLETE — DEGREE 100%
-            </Text>
-          </View>
-        )}
       </View>
 
       {/* New course input */}
-      <View style={styles.inputPanel}>
-        <Text style={styles.inputPanelTitle}>LOG A PASSED COURSE</Text>
+      <View style={styles.inputSection}>
+        <Text style={styles.inputSectionLabel}>▸ LOG A PASSED COURSE</Text>
         <View style={styles.inputRow}>
           <TextInput
             style={[styles.input, styles.inputName]}
@@ -419,6 +493,12 @@ function TrackerScreen({ courses, onAddCourse, onDeleteCourse }) {
             NO MISSIONS COMPLETED YET.{'\n'}AH SHIT, HERE WE GO AGAIN.
           </Text>
         }
+      />
+
+      <BalanceModal
+        visible={balanceVisible}
+        onClose={() => setBalanceVisible(false)}
+        onSetBalance={onSetBalance}
       />
     </KeyboardAvoidingView>
   );
@@ -605,6 +685,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('stats'); // 'stats' | 'map'
   const [courses, setCourses] = useState([]);
   const [pins, setPins] = useState([]);
+  const [balance, setBalance] = useState(0);
   const [hydrated, setHydrated] = useState(false);
   const [mission, setMission] = useState(null); // { title, subtitle } | null
 
@@ -615,11 +696,14 @@ export default function App() {
         const entries = await AsyncStorage.multiGet([
           STORAGE_KEYS.COURSES,
           STORAGE_KEYS.PINS,
+          STORAGE_KEYS.BALANCE,
         ]);
         const storedCourses = entries[0][1];
         const storedPins = entries[1][1];
+        const storedBalance = entries[2][1];
         if (storedCourses) setCourses(JSON.parse(storedCourses));
         if (storedPins) setPins(JSON.parse(storedPins));
+        if (storedBalance) setBalance(parseFloat(storedBalance));
       } catch (error) {
         console.warn('Failed to load saved data', error);
       } finally {
@@ -642,6 +726,13 @@ export default function App() {
       (error) => console.warn('Failed to save pins', error)
     );
   }, [pins, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    AsyncStorage.setItem(STORAGE_KEYS.BALANCE, String(balance)).catch(
+      (error) => console.warn('Failed to save balance', error)
+    );
+  }, [balance, hydrated]);
 
   /* ---------- course actions ---------- */
   const handleAddCourse = useCallback((name, ects) => {
@@ -699,6 +790,8 @@ export default function App() {
             courses={courses}
             onAddCourse={handleAddCourse}
             onDeleteCourse={handleDeleteCourse}
+            balance={balance}
+            onSetBalance={setBalance}
           />
         ) : (
           <MapScreen
@@ -788,7 +881,7 @@ const styles = StyleSheet.create({
   hudTopRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'baseline',
+    alignItems: 'flex-start',
     marginBottom: 10,
   },
   hudTitle: {
@@ -801,9 +894,27 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 2, height: 2 },
     textShadowRadius: 1,
   },
+  hudSubtitle: {
+    fontFamily: HUD_FONT,
+    fontSize: 9,
+    color: COLORS.textDim,
+    letterSpacing: 3,
+    marginTop: 3,
+  },
+  hudBalanceTap: {
+    alignItems: 'flex-end',
+  },
+  hudCashLabel: {
+    fontFamily: HUD_FONT,
+    fontSize: 9,
+    fontWeight: '900',
+    color: COLORS.textDim,
+    letterSpacing: 3,
+    marginBottom: 2,
+  },
   hudMoney: {
     fontFamily: HUD_FONT,
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '900',
     color: COLORS.moneyGreen,
     letterSpacing: 1,
@@ -855,65 +966,47 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.14)',
   },
 
-  hudStatsRow: {
+  hudFooterRow: {
     flexDirection: 'row',
-    gap: 10,
-  },
-  hudStatBox: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: COLORS.panelBorder,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    paddingVertical: 8,
     alignItems: 'center',
+    marginTop: 10,
+    gap: 6,
   },
-  hudStatValue: {
+  hudFooterStat: {
     fontFamily: HUD_FONT,
-    fontSize: 22,
-    fontWeight: '900',
-    color: COLORS.hudGold,
-    textShadowColor: COLORS.black,
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 1,
-  },
-  hudStatLabel: {
-    fontFamily: HUD_FONT,
-    fontSize: 9,
+    fontSize: 11,
     color: COLORS.textDim,
     letterSpacing: 1,
-    marginTop: 3,
-    textAlign: 'center',
   },
-  completeBanner: {
-    marginTop: 12,
-    borderWidth: 2,
-    borderColor: COLORS.hudGold,
-    paddingVertical: 8,
-    alignItems: 'center',
-  },
-  completeBannerText: {
-    fontFamily: HUD_FONT,
-    fontSize: 15,
-    fontWeight: '900',
+  hudFooterValue: {
     color: COLORS.hudGold,
+    fontWeight: '900',
+  },
+  hudFooterDot: {
+    color: COLORS.panelBorder,
+    fontSize: 16,
+    lineHeight: 16,
+  },
+  hudCompleteTag: {
+    fontFamily: HUD_FONT,
+    fontSize: 11,
+    fontWeight: '900',
+    color: COLORS.groveGreen,
     letterSpacing: 2,
   },
 
-  /* ----- input panel ----- */
-  inputPanel: {
-    backgroundColor: COLORS.panel,
-    borderWidth: 2,
-    borderColor: COLORS.panelBorder,
-    marginHorizontal: 12,
-    marginVertical: 6,
-    padding: 12,
+  /* ----- input section ----- */
+  inputSection: {
+    paddingHorizontal: 12,
+    paddingTop: 14,
+    paddingBottom: 6,
   },
-  inputPanelTitle: {
+  inputSectionLabel: {
     fontFamily: HUD_FONT,
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '900',
-    color: COLORS.white,
-    letterSpacing: 2,
+    color: COLORS.neonGreen,
+    letterSpacing: 3,
     marginBottom: 8,
   },
   inputRow: {
