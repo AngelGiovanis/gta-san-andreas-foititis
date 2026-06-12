@@ -12,6 +12,11 @@
     },
     "android": {
       "package": "com.angelgiovanis.gtafoititis"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "46ffedc6-c5c1-4f88-9fe9-71b5a8186065"
+      }
     }
   }
 }
