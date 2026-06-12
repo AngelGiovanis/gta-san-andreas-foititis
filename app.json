@@ -8,11 +8,23 @@
     "backgroundColor": "#070A06",
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.angelgiovanis.gtafoititis"
+      "bundleIdentifier": "com.angelgiovanis.gtafoititis",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Shows your position on the Los Athens radar."
+      }
     },
     "android": {
-      "package": "com.angelgiovanis.gtafoititis"
+      "package": "com.angelgiovanis.gtafoititis",
+      "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION"]
     },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Shows your position on the Los Athens radar."
+        }
+      ]
+    ],
     "extra": {
       "eas": {
         "projectId": "46ffedc6-c5c1-4f88-9fe9-71b5a8186065"

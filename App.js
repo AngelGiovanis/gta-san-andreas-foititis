@@ -39,6 +39,7 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import MapView, { Marker } from 'react-native-maps';
+import * as Location from 'expo-location';
 
 /* ------------------------------------------------------------------ */
 /*  CONSTANTS                                                          */
@@ -61,10 +62,10 @@ const ATHENS_REGION = {
 };
 
 const CATEGORIES = [
-  { id: 'coffee', label: 'CHEAP COFFEE', color: '#F5A623' },
-  { id: 'study', label: 'STUDY SPOTS', color: '#4FC3F7' },
-  { id: 'eats', label: 'HIGH-PROTEIN CHEAP EATS', color: '#FF5252' },
-  { id: 'skate', label: 'SKATE / CRUISING ROUTES', color: '#7CFC5A' },
+  { id: 'coffee', label: 'CHEAP COFFEE', color: '#F5A623', icon: '☕' },
+  { id: 'study', label: 'STUDY SPOTS', color: '#4FC3F7', icon: '📚' },
+  { id: 'eats', label: 'HIGH-PROTEIN CHEAP EATS', color: '#FF5252', icon: '🍗' },
+  { id: 'skate', label: 'SKATE / CRUISING ROUTES', color: '#7CFC5A', icon: '🛹' },
 ];
 
 const CATEGORY_BY_ID = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
@@ -340,6 +341,8 @@ function TrackerScreen({ courses, onAddCourse, onDeleteCourse, balance, onSetBal
   const [name, setName] = useState('');
   const [ectsText, setEctsText] = useState('');
   const [balanceVisible, setBalanceVisible] = useState(false);
+  // Course list is hidden by default, behind a cash-counter style toggle.
+  const [showCourses, setShowCourses] = useState(false);
 
   const totalEcts = useMemo(
     () => courses.reduce((sum, c) => sum + c.ects, 0),
@@ -475,25 +478,35 @@ function TrackerScreen({ courses, onAddCourse, onDeleteCourse, balance, onSetBal
         </TouchableOpacity>
       </View>
 
-      {/* Completed course list */}
-      <FlatList
-        data={courses}
-        keyExtractor={(item) => item.id}
-        renderItem={renderCourse}
-        style={styles.courseList}
-        contentContainerStyle={styles.courseListContent}
-        keyboardShouldPersistTaps="handled"
-        ListHeaderComponent={
-          <Text style={styles.courseListHeader}>
-            COMPLETED MISSIONS ({courses.length})
-          </Text>
-        }
-        ListEmptyComponent={
-          <Text style={styles.courseListEmpty}>
-            NO MISSIONS COMPLETED YET.{'\n'}AH SHIT, HERE WE GO AGAIN.
-          </Text>
-        }
-      />
+      {/* Cash-counter style toggle for the completed course list */}
+      <TouchableOpacity
+        style={styles.coursesToggle}
+        onPress={() => setShowCourses((prev) => !prev)}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.coursesToggleText}>
+          {showCourses
+            ? '▲ HIDE CLASSES'
+            : `▼ SEE ALL CLASSES (${String(courses.length).padStart(2, '0')})`}
+        </Text>
+      </TouchableOpacity>
+
+      {/* Completed course list (collapsed by default) */}
+      {showCourses && (
+        <FlatList
+          data={courses}
+          keyExtractor={(item) => item.id}
+          renderItem={renderCourse}
+          style={styles.courseList}
+          contentContainerStyle={styles.courseListContent}
+          keyboardShouldPersistTaps="handled"
+          ListEmptyComponent={
+            <Text style={styles.courseListEmpty}>
+              NO MISSIONS COMPLETED YET.{'\n'}AH SHIT, HERE WE GO AGAIN.
+            </Text>
+          }
+        />
+      )}
 
       <BalanceModal
         visible={balanceVisible}
@@ -518,8 +531,10 @@ const PinMarker = React.memo(function PinMarker({ pin, onCalloutPress }) {
       onCalloutPress={() => onCalloutPress(pin)}
       tracksViewChanges={false}
     >
-      {/* Rotated square = classic SA radar blip */}
-      <View style={[styles.blip, { backgroundColor: category.color }]} />
+      {/* Rotated square = classic SA radar blip; icon counter-rotated upright */}
+      <View style={[styles.blip, { backgroundColor: category.color }]}>
+        <Text style={styles.blipIcon}>{category.icon}</Text>
+      </View>
     </Marker>
   );
 });
@@ -533,6 +548,49 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
   const [draftCoord, setDraftCoord] = useState(null);
   const [draftName, setDraftName] = useState('');
   const [draftCategory, setDraftCategory] = useState(CATEGORIES[0].id);
+  const [hasLocationPermission, setHasLocationPermission] = useState(false);
+  const mapRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (!cancelled) setHasLocationPermission(status === 'granted');
+      } catch (error) {
+        console.warn('Location permission request failed', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleRecenter = useCallback(async () => {
+    if (!hasLocationPermission) {
+      Alert.alert(
+        'NO SIGNAL',
+        'Location permission is off. Enable it in Settings to show up on the radar.'
+      );
+      return;
+    }
+    try {
+      const position = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      mapRef.current?.animateToRegion(
+        {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        },
+        600
+      );
+    } catch (error) {
+      Alert.alert('NO SIGNAL', 'Could not get a GPS fix. Try again outside.');
+    }
+  }, [hasLocationPermission]);
 
   const handleLongPress = useCallback((event) => {
     const { coordinate } = event.nativeEvent;
@@ -573,11 +631,14 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
   return (
     <View style={styles.screen}>
       <MapView
+        ref={mapRef}
         style={StyleSheet.absoluteFill}
         initialRegion={ATHENS_REGION}
         customMapStyle={DARK_RADAR_MAP_STYLE}
         userInterfaceStyle="dark"
         onLongPress={handleLongPress}
+        showsUserLocation={hasLocationPermission}
+        showsMyLocationButton={false}
         rotateEnabled={false}
         pitchEnabled={false}
         toolbarEnabled={false}
@@ -593,11 +654,22 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
         {CATEGORIES.map((cat) => (
           <View key={cat.id} style={styles.legendRow}>
             <View style={[styles.blipSmall, { backgroundColor: cat.color }]} />
-            <Text style={styles.legendLabel}>{cat.label}</Text>
+            <Text style={styles.legendLabel}>
+              {cat.icon} {cat.label}
+            </Text>
           </View>
         ))}
         <Text style={styles.legendHint}>LONG-PRESS MAP TO DROP A WAYPOINT</Text>
       </View>
+
+      {/* Recenter on player */}
+      <TouchableOpacity
+        style={styles.recenterButton}
+        onPress={handleRecenter}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.recenterButtonText}>◎ ME</Text>
+      </TouchableOpacity>
 
       {/* New waypoint modal */}
       <Modal
@@ -650,7 +722,7 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
                       selected && { color: cat.color },
                     ]}
                   >
-                    {cat.label}
+                    {cat.icon} {cat.label}
                   </Text>
                 </TouchableOpacity>
               );
@@ -1048,6 +1120,25 @@ const styles = StyleSheet.create({
   },
 
   /* ----- course list ----- */
+  coursesToggle: {
+    backgroundColor: COLORS.panel,
+    borderWidth: 2,
+    borderColor: COLORS.panelBorder,
+    marginHorizontal: 12,
+    marginVertical: 6,
+    paddingVertical: 11,
+    alignItems: 'center',
+  },
+  coursesToggleText: {
+    fontFamily: HUD_FONT,
+    fontSize: 14,
+    fontWeight: '900',
+    color: COLORS.moneyGreen,
+    letterSpacing: 2,
+    textShadowColor: COLORS.black,
+    textShadowOffset: { width: 2, height: 2 },
+    textShadowRadius: 1,
+  },
   courseList: {
     flex: 1,
     marginHorizontal: 12,
@@ -1177,11 +1268,34 @@ const styles = StyleSheet.create({
 
   /* ----- map / radar ----- */
   blip: {
-    width: 18,
-    height: 18,
+    width: 30,
+    height: 30,
     borderWidth: 2,
     borderColor: COLORS.black,
     transform: [{ rotate: '45deg' }],
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  blipIcon: {
+    fontSize: 14,
+    transform: [{ rotate: '-45deg' }],
+  },
+  recenterButton: {
+    position: 'absolute',
+    right: 12,
+    bottom: 12,
+    backgroundColor: COLORS.panel,
+    borderWidth: 2,
+    borderColor: COLORS.neonGreen,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  recenterButtonText: {
+    fontFamily: HUD_FONT,
+    fontSize: 14,
+    fontWeight: '900',
+    color: COLORS.neonGreen,
+    letterSpacing: 2,
   },
   blipSmall: {
     width: 10,
