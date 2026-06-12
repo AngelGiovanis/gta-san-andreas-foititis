@@ -25,6 +25,7 @@ import {
   Alert,
   Animated,
   FlatList,
+  Image,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -70,6 +71,9 @@ const CATEGORIES = [
 
 const CATEGORY_BY_ID = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
 
+// CJ's radar blip from the game's hud.txd — used as the live-location marker.
+const CJ_ICON = require('./assets/radar_CJ.png');
+
 // San Andreas HUD palette.
 const COLORS = {
   bg: '#070A06',
@@ -92,12 +96,51 @@ const COLORS = {
 const HUD_FONT = Platform.select({ ios: 'AvenirNextCondensed-Heavy', android: 'sans-serif-condensed' });
 const MISSION_FONT = Platform.select({ ios: 'Georgia-BoldItalic', android: 'serif' });
 
-// Classic GTA: San Andreas paper-map palette: concrete-gray land, white
-// city blocks, bold black roads, green parks, steel-blue water.
-// NOTE: customMapStyle only applies on the Google Maps provider (Android,
-// or an iOS dev build with a Google Maps key). In Expo Go on iOS the map
-// is Apple Maps, which ignores this and falls back to its standard light
-// look (set via userInterfaceStyle="light" below).
+// Gritty dark in-game radar palette for Google-provider maps. In Expo Go
+// on iOS the map is Apple Maps, which ignores customMapStyle — dark mode
+// there comes from the MapView's userInterfaceStyle="dark" prop.
+const DARK_RADAR_MAP_STYLE = [
+  { elementType: 'geometry', stylers: [{ color: '#0d130c' }] },
+  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#6b7a62' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#070a06' }] },
+  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+  {
+    featureType: 'poi.park',
+    elementType: 'geometry',
+    stylers: [{ color: '#11200f' }, { visibility: 'on' }],
+  },
+  {
+    featureType: 'road',
+    elementType: 'geometry',
+    stylers: [{ color: '#1d2419' }],
+  },
+  {
+    featureType: 'road',
+    elementType: 'geometry.stroke',
+    stylers: [{ color: '#0b0f09' }],
+  },
+  {
+    featureType: 'road',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#7d8a72' }],
+  },
+  {
+    featureType: 'road.highway',
+    elementType: 'geometry',
+    stylers: [{ color: '#33402b' }],
+  },
+  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+  {
+    featureType: 'water',
+    elementType: 'geometry',
+    stylers: [{ color: '#04090c' }],
+  },
+];
+
+// Alternative: classic SA paper-map palette (light). Swap it into the
+// MapView's customMapStyle prop if you prefer the paper-map look on
+// Google-provider builds.
 const SA_PAPER_MAP_STYLE = [
   // Concrete-gray base, like the SA map background.
   { elementType: 'geometry', stylers: [{ color: '#b8b8b6' }] },
@@ -591,49 +634,59 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
   const [draftCoord, setDraftCoord] = useState(null);
   const [draftName, setDraftName] = useState('');
   const [draftCategory, setDraftCategory] = useState(CATEGORIES[0].id);
-  const [hasLocationPermission, setHasLocationPermission] = useState(false);
+  const [userCoord, setUserCoord] = useState(null);
   const mapRef = useRef(null);
 
+  // Follow the player: request permission once, then keep the CJ blip
+  // in sync with the device's position.
   useEffect(() => {
     let cancelled = false;
+    let subscription = null;
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (!cancelled) setHasLocationPermission(status === 'granted');
+        if (cancelled || status !== 'granted') return;
+        subscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: 4000,
+            distanceInterval: 10,
+          },
+          (position) => {
+            setUserCoord({
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+            });
+          }
+        );
+        if (cancelled) subscription.remove();
       } catch (error) {
-        console.warn('Location permission request failed', error);
+        console.warn('Location tracking failed', error);
       }
     })();
     return () => {
       cancelled = true;
+      subscription?.remove();
     };
   }, []);
 
-  const handleRecenter = useCallback(async () => {
-    if (!hasLocationPermission) {
+  const handleRecenter = useCallback(() => {
+    if (!userCoord) {
       Alert.alert(
         'NO SIGNAL',
-        'Location permission is off. Enable it in Settings to show up on the radar.'
+        'No GPS fix yet. Make sure location permission is enabled in Settings.'
       );
       return;
     }
-    try {
-      const position = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
-      mapRef.current?.animateToRegion(
-        {
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        },
-        600
-      );
-    } catch (error) {
-      Alert.alert('NO SIGNAL', 'Could not get a GPS fix. Try again outside.');
-    }
-  }, [hasLocationPermission]);
+    mapRef.current?.animateToRegion(
+      {
+        ...userCoord,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      },
+      600
+    );
+  }, [userCoord]);
 
   const handleLongPress = useCallback((event) => {
     const { coordinate } = event.nativeEvent;
@@ -677,11 +730,9 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
         ref={mapRef}
         style={StyleSheet.absoluteFill}
         initialRegion={ATHENS_REGION}
-        customMapStyle={SA_PAPER_MAP_STYLE}
-        userInterfaceStyle="light"
+        customMapStyle={DARK_RADAR_MAP_STYLE}
+        userInterfaceStyle="dark"
         onLongPress={handleLongPress}
-        showsUserLocation={hasLocationPermission}
-        showsMyLocationButton={false}
         rotateEnabled={false}
         pitchEnabled={false}
         toolbarEnabled={false}
@@ -689,6 +740,17 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
         {pins.map((pin) => (
           <PinMarker key={pin.id} pin={pin} onCalloutPress={handleCalloutPress} />
         ))}
+        {/* The player: CJ's blip from hud.txd instead of the stock blue dot */}
+        {userCoord && (
+          <Marker
+            coordinate={userCoord}
+            anchor={{ x: 0.5, y: 0.5 }}
+            zIndex={999}
+            tracksViewChanges={false}
+          >
+            <Image source={CJ_ICON} style={styles.playerIcon} />
+          </Marker>
+        )}
       </MapView>
 
       {/* Radar legend */}
@@ -1322,6 +1384,11 @@ const styles = StyleSheet.create({
   blipIcon: {
     fontSize: 14,
     transform: [{ rotate: '-45deg' }],
+  },
+  playerIcon: {
+    width: 36,
+    height: 36,
+    resizeMode: 'contain',
   },
   recenterButton: {
     position: 'absolute',
