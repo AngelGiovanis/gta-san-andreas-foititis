@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "GTA: San Andreas Foititis",
+    "slug": "gta-san-andreas-foititis",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#070A06",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.angelgiovanis.gtafoititis"
+    },
+    "android": {
+      "package": "com.angelgiovanis.gtafoititis"
+    }
+  }
+}
