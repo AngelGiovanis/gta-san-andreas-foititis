@@ -92,60 +92,103 @@ const COLORS = {
 const HUD_FONT = Platform.select({ ios: 'AvenirNextCondensed-Heavy', android: 'sans-serif-condensed' });
 const MISSION_FONT = Platform.select({ ios: 'Georgia-BoldItalic', android: 'serif' });
 
-// Gritty in-game radar feel for Google-provider maps (Android / dev builds).
-// On iOS with Apple Maps the MapView's userInterfaceStyle="dark" prop is
-// used instead, since Apple Maps ignores customMapStyle.
-const DARK_RADAR_MAP_STYLE = [
-  { elementType: 'geometry', stylers: [{ color: '#0d130c' }] },
+// Classic GTA: San Andreas paper-map palette: concrete-gray land, white
+// city blocks, bold black roads, green parks, steel-blue water.
+// NOTE: customMapStyle only applies on the Google Maps provider (Android,
+// or an iOS dev build with a Google Maps key). In Expo Go on iOS the map
+// is Apple Maps, which ignores this and falls back to its standard light
+// look (set via userInterfaceStyle="light" below).
+const SA_PAPER_MAP_STYLE = [
+  // Concrete-gray base, like the SA map background.
+  { elementType: 'geometry', stylers: [{ color: '#b8b8b6' }] },
   { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#6b7a62' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#070a06' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#2b2b2b' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#e8e8e4' }] },
   {
     featureType: 'administrative',
     elementType: 'geometry.stroke',
-    stylers: [{ color: '#2a3325' }],
+    stylers: [{ color: '#8f8f8c' }],
+  },
+  // City blocks read as white slabs.
+  {
+    featureType: 'landscape.man_made',
+    elementType: 'geometry',
+    stylers: [{ color: '#dadad6' }],
+  },
+  {
+    featureType: 'landscape.natural',
+    elementType: 'geometry',
+    stylers: [{ color: '#aab3a0' }],
   },
   { featureType: 'poi', stylers: [{ visibility: 'off' }] },
   {
+    featureType: 'poi.business',
+    elementType: 'geometry',
+    stylers: [{ color: '#ffffff' }, { visibility: 'on' }],
+  },
+  // SA-green parks.
+  {
     featureType: 'poi.park',
     elementType: 'geometry',
-    stylers: [{ color: '#11200f' }, { visibility: 'on' }],
+    stylers: [{ color: '#5e8a3a' }, { visibility: 'on' }],
   },
+  {
+    featureType: 'poi.park',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#2f4a1c' }],
+  },
+  // All roads bold and black, like the in-game map.
   {
     featureType: 'road',
     elementType: 'geometry',
-    stylers: [{ color: '#1d2419' }],
+    stylers: [{ color: '#1a1a1a' }],
   },
   {
     featureType: 'road',
     elementType: 'geometry.stroke',
-    stylers: [{ color: '#0b0f09' }],
+    stylers: [{ color: '#1a1a1a' }],
   },
   {
     featureType: 'road',
     elementType: 'labels.text.fill',
-    stylers: [{ color: '#7d8a72' }],
+    stylers: [{ color: '#1f1f1f' }],
+  },
+  {
+    featureType: 'road',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#d9d9d5' }],
   },
   {
     featureType: 'road.highway',
     elementType: 'geometry',
-    stylers: [{ color: '#33402b' }],
+    stylers: [{ color: '#000000' }],
   },
   {
     featureType: 'road.highway',
     elementType: 'geometry.stroke',
-    stylers: [{ color: '#141a10' }],
+    stylers: [{ color: '#000000' }],
+  },
+  {
+    featureType: 'road.local',
+    elementType: 'geometry',
+    stylers: [{ color: '#2e2e2e' }],
   },
   { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+  // Steel-blue SA ocean.
   {
     featureType: 'water',
     elementType: 'geometry',
-    stylers: [{ color: '#04090c' }],
+    stylers: [{ color: '#7298c4' }],
   },
   {
     featureType: 'water',
     elementType: 'labels.text.fill',
-    stylers: [{ color: '#3a4d56' }],
+    stylers: [{ color: '#2c4a73' }],
+  },
+  {
+    featureType: 'water',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#a9c2de' }],
   },
 ];
 
@@ -634,8 +677,8 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
         ref={mapRef}
         style={StyleSheet.absoluteFill}
         initialRegion={ATHENS_REGION}
-        customMapStyle={DARK_RADAR_MAP_STYLE}
-        userInterfaceStyle="dark"
+        customMapStyle={SA_PAPER_MAP_STYLE}
+        userInterfaceStyle="light"
         onLongPress={handleLongPress}
         showsUserLocation={hasLocationPermission}
         showsMyLocationButton={false}
