@@ -31,6 +31,7 @@ import {
   Modal,
   Platform,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -39,7 +40,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 
 /* ------------------------------------------------------------------ */
@@ -52,6 +53,7 @@ const STORAGE_KEYS = {
   COURSES: '@gta_foititis_courses_v1',
   PINS: '@gta_foititis_pins_v1',
   BALANCE: '@gta_foititis_balance_v1',
+  PROJECTS: '@gta_foititis_projects_v1',
 };
 
 // Centered on Athens — Syntagma-ish, wide enough to cover NKUA & the center.
@@ -62,32 +64,64 @@ const ATHENS_REGION = {
   longitudeDelta: 0.09,
 };
 
-const CATEGORIES = [
-  { id: 'coffee', label: 'CHEAP COFFEE', color: '#F5A623', icon: '☕' },
-  { id: 'study', label: 'STUDY SPOTS', color: '#4FC3F7', icon: '📚' },
-  { id: 'eats', label: 'HIGH-PROTEIN CHEAP EATS', color: '#FF5252', icon: '🍗' },
-  { id: 'skate', label: 'SKATE / CRUISING ROUTES', color: '#7CFC5A', icon: '🛹' },
+/*
+ * Pin types for the radar. To add one with a custom icon, drop a PNG in
+ * assets/pins/ and add a row with `image: require('./assets/pins/foo.png')`.
+ * While `image` is null the blip falls back to an SA-style letter square
+ * using `color` + `icon`.
+ */
+const PIN_TYPES = [
+  { id: 'coffee', label: 'CHEAP COFFEE', color: '#F5A623', icon: 'C', image: null },
+  { id: 'study', label: 'STUDY SPOTS', color: '#4FC3F7', icon: '📚', image: null, emoji: true },
+  { id: 'eats', label: 'HIGH-PROTEIN CHEAP EATS', color: '#FF5252', icon: 'E', image: null },
+  { id: 'skate', label: 'SKATE / CRUISING ROUTES', color: '#7CFC5A', icon: 'R', image: null },
+  { id: 'library', label: 'LIBRARIES', color: '#003462', icon: 'L', image: require('./assets/pins/library.png') },
+  { id: 'dit', label: 'NKUA DIT', color: '#4A90D9', icon: 'D', image: require('./assets/pins/dit.png') },
 ];
 
-const CATEGORY_BY_ID = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
+// Permanent map markers (not stored in AsyncStorage, not deletable).
+// Libraries of Athens + NKUA DIT.
+const STATIC_PINS = [
+  { id: 'dit-nkua', name: 'NKUA · DIT', category: 'dit', latitude: 37.9681363, longitude: 23.7665448 },
+];
+
+const PIN_TYPE_BY_ID = Object.fromEntries(PIN_TYPES.map((c) => [c.id, c]));
+
+/*
+ * Live OASA buses. Put the line numbers you care about here (the public
+ * LineID printed on the bus, e.g. '608', '230', '040') with a blip color.
+ * Positions come from the OASA telematics API and refresh every 10s.
+ */
+const BUS_LINES = [
+  { id: '140', color: '#FF4444' }, // POLYGONO - GLYFADA (red)
+  { id: '4', color: '#4FC3F7' }, // ANO KYPSELI - AG. ARTEMIOS trolley (blue)
+  { id: '250', color: '#7CFC5A' }, // PANEPISTIMIOUPOLI - EVAGGELISMOS (lime)
+];
+
+const OASA_API = 'https://telematics.oasa.gr/api/';
+const BUS_POLL_MS = 10000;
+
+async function oasaGet(query) {
+  const res = await fetch(`${OASA_API}?act=${query}`, { method: 'POST' });
+  return res.json();
+}
 
 // CJ's radar blip from the game's hud.txd — used as the live-location marker.
 const CJ_ICON = require('./assets/radar_CJ.png');
 
 // San Andreas HUD palette.
+// Monochrome base (black / gray / white) with a single SA-gold accent.
 const COLORS = {
-  bg: '#070A06',
-  panel: 'rgba(10, 14, 9, 0.92)',
-  panelBorder: '#1C2418',
-  groveGreen: '#5FD35F',
-  neonGreen: '#7CFC5A',
-  moneyGreen: '#9CE564',
+  bg: '#0A0A0A',
+  panel: 'rgba(14, 14, 14, 0.92)',
+  panelBorder: '#262626',
+  accent: '#E8C547',
   hudGold: '#E8C547',
   missionGold: '#DCBE6C',
   healthRed: '#B4191D',
   armorGrey: '#5C7A98',
-  textDim: '#8A9384',
-  white: '#F2F2E9',
+  textDim: '#8F8F88',
+  white: '#F2F2F0',
   black: '#000000',
 };
 
@@ -238,6 +272,37 @@ const SA_PAPER_MAP_STYLE = [
 const makeId = () =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+// Parses "DD/MM", "DD/MM/YY", or "DD/MM/YYYY". Returns a Date or null.
+function parseDue(str) {
+  const parts = str.trim().split(/[\/\-\.]/);
+  if (parts.length < 2) return null;
+  const day = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10) - 1;
+  const now = new Date();
+  let year = now.getFullYear();
+  if (parts[2]) {
+    year = parts[2].length === 2 ? 2000 + parseInt(parts[2], 10) : parseInt(parts[2], 10);
+  }
+  const d = new Date(year, month, day);
+  if (isNaN(d.getTime())) return null;
+  // If no year given and date already passed, bump to next year.
+  if (!parts[2] && d < now) d.setFullYear(year + 1);
+  return d;
+}
+
+function daysLeft(dueDate) {
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  return Math.ceil((dueDate - now) / 86400000);
+}
+
+const hexAlpha = (hex, a) => {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${a})`;
+};
+
 /* ------------------------------------------------------------------ */
 /*  "MISSION PASSED!" OVERLAY                                          */
 /* ------------------------------------------------------------------ */
@@ -357,6 +422,42 @@ const CourseRow = React.memo(function CourseRow({ course, onDelete }) {
 });
 
 /* ------------------------------------------------------------------ */
+/*  PROJECT ROW                                                        */
+/* ------------------------------------------------------------------ */
+
+const ProjectRow = React.memo(function ProjectRow({ project, onDelete }) {
+  const due = parseDue(project.due);
+  const days = due ? daysLeft(due) : null;
+
+  let daysColor = COLORS.white;
+  let daysLabel = '—';
+  if (days !== null) {
+    if (days < 0) { daysColor = COLORS.healthRed; daysLabel = 'OVERDUE'; }
+    else if (days === 0) { daysColor = COLORS.healthRed; daysLabel = 'TODAY'; }
+    else if (days <= 2) { daysColor = COLORS.healthRed; daysLabel = `${days}D LEFT`; }
+    else if (days <= 6) { daysColor = COLORS.accent; daysLabel = `${days}D LEFT`; }
+    else { daysColor = COLORS.textDim; daysLabel = `${days}D`; }
+  }
+
+  return (
+    <View style={styles.projectRow}>
+      <View style={styles.projectRowLeft}>
+        <Text style={styles.projectName} numberOfLines={1}>{project.name}</Text>
+        <Text style={styles.projectDue}>{project.due}</Text>
+      </View>
+      <Text style={[styles.projectDays, { color: daysColor }]}>{daysLabel}</Text>
+      <TouchableOpacity
+        style={styles.courseDeleteBtn}
+        onPress={() => onDelete(project)}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <Text style={styles.courseDeleteText}>✕</Text>
+      </TouchableOpacity>
+    </View>
+  );
+});
+
+/* ------------------------------------------------------------------ */
 /*  FINANCE PANEL                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -423,12 +524,14 @@ function BalanceModal({ visible, onClose, onSetBalance }) {
 /*  TRACKER SCREEN                                                     */
 /* ------------------------------------------------------------------ */
 
-function TrackerScreen({ courses, onAddCourse, onDeleteCourse, balance, onSetBalance }) {
+function TrackerScreen({ courses, onAddCourse, onDeleteCourse, balance, onSetBalance, projects, onAddProject, onDeleteProject }) {
   const [name, setName] = useState('');
   const [ectsText, setEctsText] = useState('');
   const [balanceVisible, setBalanceVisible] = useState(false);
-  // Course list is hidden by default, behind a cash-counter style toggle.
   const [showCourses, setShowCourses] = useState(false);
+  const [showProjects, setShowProjects] = useState(true);
+  const [projName, setProjName] = useState('');
+  const [projDue, setProjDue] = useState('');
 
   const totalEcts = useMemo(
     () => courses.reduce((sum, c) => sum + c.ects, 0),
@@ -481,10 +584,39 @@ function TrackerScreen({ courses, onAddCourse, onDeleteCourse, balance, onSetBal
     [onDeleteCourse]
   );
 
-  const renderCourse = useCallback(
-    ({ item }) => <CourseRow course={item} onDelete={handleDelete} />,
-    [handleDelete]
-  );
+  const sortedProjects = useMemo(() => {
+    return [...projects].sort((a, b) => {
+      const da = parseDue(a.due);
+      const db = parseDue(b.due);
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return da - db;
+    });
+  }, [projects]);
+
+  const handleAddProject = useCallback(() => {
+    const trimmed = projName.trim();
+    if (!trimmed) {
+      Alert.alert('MISSION FAILED', 'Give the project a name.');
+      return;
+    }
+    if (projDue.trim() && !parseDue(projDue)) {
+      Alert.alert('MISSION FAILED', 'Use DD/MM or DD/MM/YY format for the date.');
+      return;
+    }
+    Keyboard.dismiss();
+    onAddProject({ id: makeId(), name: trimmed, due: projDue.trim() || '—' });
+    setProjName('');
+    setProjDue('');
+  }, [projName, projDue, onAddProject]);
+
+  const handleDeleteProject = useCallback((project) => {
+    Alert.alert('WASTED', `Remove "${project.name}"?`, [
+      { text: 'CANCEL', style: 'cancel' },
+      { text: 'REMOVE', style: 'destructive', onPress: () => onDeleteProject(project.id) },
+    ]);
+  }, [onDeleteProject]);
 
   return (
     <KeyboardAvoidingView
@@ -492,107 +624,169 @@ function TrackerScreen({ courses, onAddCourse, onDeleteCourse, balance, onSetBal
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 60 : 0}
     >
-      {/* HUD header */}
-      <View style={styles.hudPanel}>
-        <View style={styles.hudTopRow}>
-          <View>
-            <Text style={styles.hudTitle}>NKUA · DIT</Text>
-            <Text style={styles.hudSubtitle}>INFORMATICS & TELECOM</Text>
+      <ScrollView
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={styles.trackerScroll}
+      >
+        {/* HUD header */}
+        <View style={styles.hudPanel}>
+          <View style={styles.hudTopRow}>
+            <View>
+              <Text style={styles.hudTitle}>NKUA · DIT</Text>
+              <Text style={styles.hudSubtitle}>INFORMATICS & TELECOM</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.hudBalanceTap}
+              onPress={() => setBalanceVisible(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.hudCashLabel}>CASH ▸</Text>
+              <Text style={styles.hudMoney}>€{formattedBalance}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <HudBar totalEcts={totalEcts} />
+
+          <View style={styles.hudFooterRow}>
+            <Text style={styles.hudFooterStat}>
+              <Text style={styles.hudFooterValue}>{remaining}</Text>
+              {' ECTS LEFT'}
+            </Text>
+            {!isComplete ? (
+              <>
+                <Text style={styles.hudFooterDot}>·</Text>
+                <Text style={styles.hudFooterStat}>
+                  {'~'}<Text style={styles.hudFooterValue}>{minLessons}–{maxLessons}</Text>
+                  {' COURSES'}
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.hudCompleteTag}>· GAME COMPLETE ✓</Text>
+            )}
+          </View>
+        </View>
+
+        {/* New course input */}
+        <View style={styles.inputSection}>
+          <Text style={styles.inputSectionLabel}>▸ LOG A PASSED COURSE</Text>
+          <View style={styles.inputRow}>
+            <TextInput
+              style={[styles.input, styles.inputName]}
+              placeholder="COURSE NAME"
+              placeholderTextColor={COLORS.textDim}
+              value={name}
+              onChangeText={setName}
+              returnKeyType="next"
+              autoCapitalize="characters"
+            />
+            <TextInput
+              style={[styles.input, styles.inputEcts]}
+              placeholder="ECTS"
+              placeholderTextColor={COLORS.textDim}
+              value={ectsText}
+              onChangeText={setEctsText}
+              keyboardType="decimal-pad"
+              returnKeyType="done"
+              maxLength={4}
+              onSubmitEditing={handleAdd}
+            />
           </View>
           <TouchableOpacity
-            style={styles.hudBalanceTap}
-            onPress={() => setBalanceVisible(true)}
-            activeOpacity={0.7}
+            style={styles.addButton}
+            onPress={handleAdd}
+            activeOpacity={0.8}
           >
-            <Text style={styles.hudCashLabel}>CASH ▸</Text>
-            <Text style={styles.hudMoney}>€{formattedBalance}</Text>
+            <Text style={styles.addButtonText}>COMPLETE MISSION</Text>
           </TouchableOpacity>
         </View>
 
-        <HudBar totalEcts={totalEcts} />
-
-        <View style={styles.hudFooterRow}>
-          <Text style={styles.hudFooterStat}>
-            <Text style={styles.hudFooterValue}>{remaining}</Text>
-            {' ECTS LEFT'}
-          </Text>
-          {!isComplete ? (
-            <>
-              <Text style={styles.hudFooterDot}>·</Text>
-              <Text style={styles.hudFooterStat}>
-                {'~'}<Text style={styles.hudFooterValue}>{minLessons}–{maxLessons}</Text>
-                {' COURSES'}
-              </Text>
-            </>
-          ) : (
-            <Text style={styles.hudCompleteTag}>· GAME COMPLETE ✓</Text>
-          )}
-        </View>
-      </View>
-
-      {/* New course input */}
-      <View style={styles.inputSection}>
-        <Text style={styles.inputSectionLabel}>▸ LOG A PASSED COURSE</Text>
-        <View style={styles.inputRow}>
-          <TextInput
-            style={[styles.input, styles.inputName]}
-            placeholder="COURSE NAME"
-            placeholderTextColor={COLORS.textDim}
-            value={name}
-            onChangeText={setName}
-            returnKeyType="next"
-            autoCapitalize="characters"
-          />
-          <TextInput
-            style={[styles.input, styles.inputEcts]}
-            placeholder="ECTS"
-            placeholderTextColor={COLORS.textDim}
-            value={ectsText}
-            onChangeText={setEctsText}
-            keyboardType="decimal-pad"
-            returnKeyType="done"
-            maxLength={4}
-            onSubmitEditing={handleAdd}
-          />
-        </View>
+        {/* Active projects / assignments */}
         <TouchableOpacity
-          style={styles.addButton}
-          onPress={handleAdd}
+          style={styles.coursesToggle}
+          onPress={() => setShowProjects((p) => !p)}
           activeOpacity={0.8}
         >
-          <Text style={styles.addButtonText}>COMPLETE MISSION</Text>
+          <Text style={styles.coursesToggleText}>
+            {showProjects
+              ? '▲ HIDE ACTIVE MISSIONS'
+              : `▼ ACTIVE MISSIONS (${String(projects.length).padStart(2, '0')})`}
+          </Text>
         </TouchableOpacity>
-      </View>
 
-      {/* Cash-counter style toggle for the completed course list */}
-      <TouchableOpacity
-        style={styles.coursesToggle}
-        onPress={() => setShowCourses((prev) => !prev)}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.coursesToggleText}>
-          {showCourses
-            ? '▲ HIDE CLASSES'
-            : `▼ SEE ALL CLASSES (${String(courses.length).padStart(2, '0')})`}
-        </Text>
-      </TouchableOpacity>
+        {showProjects && (
+          <>
+            <View style={[styles.inputSection, { paddingTop: 8 }]}>
+              <View style={styles.inputRow}>
+                <TextInput
+                  style={[styles.input, styles.inputName, { color: COLORS.white }]}
+                  placeholder="PROJECT NAME"
+                  placeholderTextColor={COLORS.textDim}
+                  value={projName}
+                  onChangeText={setProjName}
+                  returnKeyType="next"
+                  autoCapitalize="characters"
+                />
+                <TextInput
+                  style={[styles.input, { width: 90, color: COLORS.white }]}
+                  placeholder="DD/MM"
+                  placeholderTextColor={COLORS.textDim}
+                  value={projDue}
+                  onChangeText={setProjDue}
+                  returnKeyType="done"
+                  maxLength={10}
+                  onSubmitEditing={handleAddProject}
+                />
+              </View>
+              <TouchableOpacity
+                style={[styles.addButton, { backgroundColor: COLORS.armorGrey }]}
+                onPress={handleAddProject}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.addButtonText, { color: COLORS.white }]}>ADD MISSION</Text>
+              </TouchableOpacity>
+            </View>
 
-      {/* Completed course list (collapsed by default) */}
-      {showCourses && (
-        <FlatList
-          data={courses}
-          keyExtractor={(item) => item.id}
-          renderItem={renderCourse}
-          style={styles.courseList}
-          contentContainerStyle={styles.courseListContent}
-          keyboardShouldPersistTaps="handled"
-          ListEmptyComponent={
-            <Text style={styles.courseListEmpty}>
+            {sortedProjects.length === 0 ? (
+              <Text style={[styles.courseListEmpty, { marginHorizontal: 12 }]}>
+                NO ACTIVE MISSIONS.{'\n'}ENJOY THE PEACE WHILE IT LASTS.
+              </Text>
+            ) : (
+              sortedProjects.map((item) => (
+                <View key={item.id} style={{ marginHorizontal: 12 }}>
+                  <ProjectRow project={item} onDelete={handleDeleteProject} />
+                </View>
+              ))
+            )}
+          </>
+        )}
+
+        {/* Completed course list toggle */}
+        <TouchableOpacity
+          style={styles.coursesToggle}
+          onPress={() => setShowCourses((prev) => !prev)}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.coursesToggleText}>
+            {showCourses
+              ? '▲ HIDE CLASSES'
+              : `▼ SEE ALL CLASSES (${String(courses.length).padStart(2, '0')})`}
+          </Text>
+        </TouchableOpacity>
+
+        {showCourses && (
+          courses.length === 0 ? (
+            <Text style={[styles.courseListEmpty, { marginHorizontal: 12 }]}>
               NO MISSIONS COMPLETED YET.{'\n'}AH SHIT, HERE WE GO AGAIN.
             </Text>
-          }
-        />
-      )}
+          ) : (
+            courses.map((item) => (
+              <View key={item.id} style={{ marginHorizontal: 12 }}>
+                <CourseRow course={item} onDelete={handleDelete} />
+              </View>
+            ))
+          )
+        )}
+      </ScrollView>
 
       <BalanceModal
         visible={balanceVisible}
@@ -607,20 +801,104 @@ function TrackerScreen({ courses, onAddCourse, onDeleteCourse, balance, onSetBal
 /*  RADAR BLIP MARKER                                                  */
 /* ------------------------------------------------------------------ */
 
-const PinMarker = React.memo(function PinMarker({ pin, onCalloutPress }) {
-  const category = CATEGORY_BY_ID[pin.category] || CATEGORIES[0];
+// Renders a pin type's icon: the custom PNG when one is set, otherwise the
+// SA letter-square fallback. `size` is the icon's edge in px.
+function Blip({ type, size }) {
+  if (type.image) {
+    return (
+      <Image
+        source={type.image}
+        style={{ width: size, height: size, resizeMode: 'contain' }}
+      />
+    );
+  }
+  if (type.emoji) {
+    return (
+      <Text style={{ fontSize: size * 0.8, lineHeight: size }}>
+        {type.icon}
+      </Text>
+    );
+  }
+  const border = size >= 24 ? 2 : 1;
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderWidth: border,
+        borderColor: COLORS.black,
+      }}
+    >
+      <View style={[styles.blipFace, { backgroundColor: type.color, borderWidth: border }]}>
+        <Text style={[styles.blipIcon, { fontSize: size * 0.55, lineHeight: size * 0.65 }]}>
+          {type.icon}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+// Live bus blip that glides to each new GPS fix instead of teleporting.
+// Plain JS tween — Marker.Animated/AnimatedRegion don't work on the
+// new architecture (Expo SDK 54), so we step the coordinate manually.
+const BUS_TWEEN_STEPS = 12;
+const BusMarker = React.memo(function BusMarker({ bus }) {
+  const [coord, setCoord] = useState({
+    latitude: bus.latitude,
+    longitude: bus.longitude,
+  });
+  const coordRef = useRef(coord);
+
+  useEffect(() => {
+    const from = coordRef.current;
+    const to = { latitude: bus.latitude, longitude: bus.longitude };
+    if (from.latitude === to.latitude && from.longitude === to.longitude) {
+      return undefined;
+    }
+    let step = 0;
+    const interval = setInterval(() => {
+      step += 1;
+      const t = step / BUS_TWEEN_STEPS;
+      const next =
+        t >= 1
+          ? to
+          : {
+              latitude: from.latitude + (to.latitude - from.latitude) * t,
+              longitude: from.longitude + (to.longitude - from.longitude) * t,
+            };
+      coordRef.current = next;
+      setCoord(next);
+      if (t >= 1) clearInterval(interval);
+    }, (BUS_POLL_MS * 0.9) / BUS_TWEEN_STEPS);
+    return () => clearInterval(interval);
+  }, [bus.latitude, bus.longitude]);
+
+  return (
+    <Marker
+      coordinate={coord}
+      anchor={{ x: 0.5, y: 0.5 }}
+      zIndex={500}
+      title={`BUS ${bus.lineId}`}
+      description={`VEHICLE ${bus.id}`}
+    >
+      <View style={[styles.busBlip, { backgroundColor: bus.color }]}>
+        <Text style={styles.busBlipText}>{bus.lineId}</Text>
+      </View>
+    </Marker>
+  );
+});
+
+const PinMarker = React.memo(function PinMarker({ pin, onCalloutPress, isStatic }) {
+  const type = PIN_TYPE_BY_ID[pin.category] || PIN_TYPES[0];
   return (
     <Marker
       coordinate={{ latitude: pin.latitude, longitude: pin.longitude }}
       title={pin.name}
-      description={category.label}
-      onCalloutPress={() => onCalloutPress(pin)}
+      description={type.label}
+      onCalloutPress={isStatic ? undefined : () => onCalloutPress(pin)}
       tracksViewChanges={false}
     >
-      {/* Rotated square = classic SA radar blip; icon counter-rotated upright */}
-      <View style={[styles.blip, { backgroundColor: category.color }]}>
-        <Text style={styles.blipIcon}>{category.icon}</Text>
-      </View>
+      <Blip type={type} size={isStatic ? 36 : 30} />
     </Marker>
   );
 });
@@ -633,9 +911,121 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
   // Coordinate of a long-press awaiting naming; null = modal closed.
   const [draftCoord, setDraftCoord] = useState(null);
   const [draftName, setDraftName] = useState('');
-  const [draftCategory, setDraftCategory] = useState(CATEGORIES[0].id);
+  const [draftType, setDraftType] = useState(PIN_TYPES[0].id);
   const [userCoord, setUserCoord] = useState(null);
+  const [buses, setBuses] = useState([]);
+  const [busStops, setBusStops] = useState([]);
+  const [busPaths, setBusPaths] = useState([]);
   const mapRef = useRef(null);
+  // routeCode -> public LineID, filled during init; used to label arrivals.
+  const routeLineRef = useRef({});
+
+  // Live OASA buses: resolve each LineID to its route codes and stops once,
+  // then poll getBusLocation for every route on an interval.
+  useEffect(() => {
+    if (BUS_LINES.length === 0) return undefined;
+    let cancelled = false;
+    let timer = null;
+
+    (async () => {
+      try {
+        const allLines = await oasaGet('webGetLines');
+        const tracked = [];
+        const stops = [];
+        const paths = [];
+        const seenStops = new Set();
+        for (const line of BUS_LINES) {
+          // A public line number can map to several LineCodes (detour /
+          // short-turn variants) — track the routes of all of them.
+          const lineCodes = allLines
+            .filter((l) => l.LineID === line.id)
+            .map((l) => l.LineCode);
+          const routeCodes = [];
+          for (const code of lineCodes) {
+            const routes = await oasaGet(`webGetRoutes&p1=${code}`);
+            if (Array.isArray(routes)) {
+              for (const r of routes) {
+                routeCodes.push(r.RouteCode);
+                routeLineRef.current[r.RouteCode] = line.id;
+              }
+            }
+          }
+          tracked.push({ line, routeCodes });
+          for (const routeCode of routeCodes) {
+            try {
+              // Street-following shape of the route, for the polyline.
+              const points = await oasaGet(`webRouteDetails&p1=${routeCode}`);
+              if (Array.isArray(points) && points.length > 1) {
+                paths.push({
+                  id: routeCode,
+                  color: line.color,
+                  coords: points.map((p) => ({
+                    latitude: parseFloat(p.routed_y),
+                    longitude: parseFloat(p.routed_x),
+                  })),
+                });
+              }
+              const routeStops = await oasaGet(`webGetStops&p1=${routeCode}`);
+              if (!Array.isArray(routeStops)) continue;
+              for (const s of routeStops) {
+                if (seenStops.has(s.StopCode)) continue;
+                seenStops.add(s.StopCode);
+                stops.push({
+                  id: s.StopCode,
+                  name: s.StopDescr,
+                  color: line.color,
+                  latitude: parseFloat(s.StopLat),
+                  longitude: parseFloat(s.StopLng),
+                });
+              }
+            } catch (error) {
+              // Skip a route whose stop list fails to load.
+            }
+          }
+        }
+        if (cancelled) return;
+        setBusStops(stops);
+        setBusPaths(paths);
+
+        const poll = async () => {
+          const next = [];
+          const seen = new Set();
+          for (const { line, routeCodes } of tracked) {
+            for (const routeCode of routeCodes) {
+              try {
+                const vehicles = await oasaGet(`getBusLocation&p1=${routeCode}`);
+                if (!Array.isArray(vehicles)) continue;
+                for (const v of vehicles) {
+                  if (seen.has(v.VEH_NO)) continue;
+                  seen.add(v.VEH_NO);
+                  next.push({
+                    id: v.VEH_NO,
+                    lineId: line.id,
+                    color: line.color,
+                    latitude: parseFloat(v.CS_LAT),
+                    longitude: parseFloat(v.CS_LNG),
+                  });
+                }
+              } catch (error) {
+                // One route failing shouldn't kill the rest of the sweep.
+              }
+            }
+          }
+          if (cancelled) return;
+          setBuses(next);
+          timer = setTimeout(poll, BUS_POLL_MS);
+        };
+        poll();
+      } catch (error) {
+        console.warn('OASA bus tracking failed', error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
 
   // Follow the player: request permission once, then keep the CJ blip
   // in sync with the device's position.
@@ -670,28 +1060,10 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
     };
   }, []);
 
-  const handleRecenter = useCallback(() => {
-    if (!userCoord) {
-      Alert.alert(
-        'NO SIGNAL',
-        'No GPS fix yet. Make sure location permission is enabled in Settings.'
-      );
-      return;
-    }
-    mapRef.current?.animateToRegion(
-      {
-        ...userCoord,
-        latitudeDelta: 0.01,
-        longitudeDelta: 0.01,
-      },
-      600
-    );
-  }, [userCoord]);
-
   const handleLongPress = useCallback((event) => {
     const { coordinate } = event.nativeEvent;
     setDraftName('');
-    setDraftCategory(CATEGORIES[0].id);
+    setDraftType(PIN_TYPES[0].id);
     setDraftCoord(coordinate);
   }, []);
 
@@ -700,19 +1072,39 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
     onAddPin({
       id: makeId(),
       name: draftName.trim() || 'UNKNOWN SPOT',
-      category: draftCategory,
+      category: draftType,
       latitude: draftCoord.latitude,
       longitude: draftCoord.longitude,
     });
     setDraftCoord(null);
-  }, [draftCoord, draftName, draftCategory, onAddPin]);
+  }, [draftCoord, draftName, draftType, onAddPin]);
 
   const handleCancelPin = useCallback(() => setDraftCoord(null), []);
 
+  // Tap a stop dot → live ETAs for the tracked lines at that stop.
+  const handleStopPress = useCallback(async (stop) => {
+    try {
+      const arrivals = await oasaGet(`getStopArrivals&p1=${stop.id}`);
+      const incoming = (Array.isArray(arrivals) ? arrivals : [])
+        .map((a) => ({
+          lineId: routeLineRef.current[a.route_code],
+          mins: parseInt(a.btime2, 10),
+        }))
+        .filter((a) => a.lineId && !Number.isNaN(a.mins))
+        .sort((a, b) => a.mins - b.mins);
+      const message = incoming.length
+        ? incoming.map((a) => `BUS ${a.lineId} — ${a.mins} MIN`).join('\n')
+        : 'NO TRACKED BUSES INCOMING';
+      Alert.alert(stop.name, message);
+    } catch (error) {
+      Alert.alert(stop.name, 'ARRIVALS UNAVAILABLE');
+    }
+  }, []);
+
   const handleCalloutPress = useCallback(
     (pin) => {
-      const category = CATEGORY_BY_ID[pin.category] || CATEGORIES[0];
-      Alert.alert(pin.name, category.label, [
+      const type = PIN_TYPE_BY_ID[pin.category] || PIN_TYPES[0];
+      Alert.alert(pin.name, type.label, [
         { text: 'KEEP', style: 'cancel' },
         {
           text: 'REMOVE WAYPOINT',
@@ -737,8 +1129,41 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
         pitchEnabled={false}
         toolbarEnabled={false}
       >
+        {/* Route lines of the tracked buses */}
+        {busPaths.map((path) => (
+          <Polyline
+            key={path.id}
+            coordinates={path.coords}
+            strokeColor={hexAlpha(path.color, 0.5)}
+            strokeWidth={2}
+          />
+        ))}
+        {STATIC_PINS.map((pin) => (
+          <PinMarker key={pin.id} pin={pin} onCalloutPress={null} isStatic />
+        ))}
         {pins.map((pin) => (
           <PinMarker key={pin.id} pin={pin} onCalloutPress={handleCalloutPress} />
+        ))}
+        {/* Bus stops of the tracked lines — tiny dots */}
+        {busStops.map((stop) => (
+          <Marker
+            key={stop.id}
+            coordinate={{ latitude: stop.latitude, longitude: stop.longitude }}
+            anchor={{ x: 0.5, y: 0.5 }}
+            onPress={() => handleStopPress(stop)}
+            tracksViewChanges={false}
+          >
+            {/* Transparent padding makes the 5px dot tappable */}
+            <View style={styles.busStopTouch}>
+              <View
+                style={[styles.busStopDot, { backgroundColor: stop.color }]}
+              />
+            </View>
+          </Marker>
+        ))}
+        {/* Live OASA buses for the tracked lines */}
+        {buses.map((bus) => (
+          <BusMarker key={bus.id} bus={bus} />
         ))}
         {/* The player: CJ's blip from hud.txd instead of the stock blue dot */}
         {userCoord && (
@@ -752,29 +1177,6 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
           </Marker>
         )}
       </MapView>
-
-      {/* Radar legend */}
-      <View style={styles.legend} pointerEvents="none">
-        <Text style={styles.legendTitle}>LOS ATHENS · RADAR</Text>
-        {CATEGORIES.map((cat) => (
-          <View key={cat.id} style={styles.legendRow}>
-            <View style={[styles.blipSmall, { backgroundColor: cat.color }]} />
-            <Text style={styles.legendLabel}>
-              {cat.icon} {cat.label}
-            </Text>
-          </View>
-        ))}
-        <Text style={styles.legendHint}>LONG-PRESS MAP TO DROP A WAYPOINT</Text>
-      </View>
-
-      {/* Recenter on player */}
-      <TouchableOpacity
-        style={styles.recenterButton}
-        onPress={handleRecenter}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.recenterButtonText}>◎ ME</Text>
-      </TouchableOpacity>
 
       {/* New waypoint modal */}
       <Modal
@@ -802,36 +1204,37 @@ function MapScreen({ pins, onAddPin, onDeletePin }) {
               onSubmitEditing={handleSavePin}
             />
 
-            <Text style={styles.modalSectionLabel}>CATEGORY</Text>
-            {CATEGORIES.map((cat) => {
-              const selected = cat.id === draftCategory;
-              return (
-                <TouchableOpacity
-                  key={cat.id}
-                  style={[
-                    styles.categoryOption,
-                    selected && {
-                      borderColor: cat.color,
-                      backgroundColor: 'rgba(255,255,255,0.06)',
-                    },
-                  ]}
-                  onPress={() => setDraftCategory(cat.id)}
-                  activeOpacity={0.7}
-                >
-                  <View
-                    style={[styles.blipSmall, { backgroundColor: cat.color }]}
-                  />
-                  <Text
+            <Text style={styles.modalSectionLabel}>PICK A BLIP</Text>
+            <View style={styles.pinGrid}>
+              {PIN_TYPES.map((type) => {
+                const selected = type.id === draftType;
+                return (
+                  <TouchableOpacity
+                    key={type.id}
                     style={[
-                      styles.categoryOptionText,
-                      selected && { color: cat.color },
+                      styles.pinTile,
+                      selected && {
+                        borderColor: type.color,
+                        backgroundColor: 'rgba(255,255,255,0.08)',
+                      },
                     ]}
+                    onPress={() => setDraftType(type.id)}
+                    activeOpacity={0.7}
                   >
-                    {cat.icon} {cat.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+                    <Blip type={type} size={34} />
+                    <Text
+                      style={[
+                        styles.pinTileLabel,
+                        selected && { color: type.color },
+                      ]}
+                      numberOfLines={2}
+                    >
+                      {type.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
 
             <View style={styles.modalButtonRow}>
               <TouchableOpacity
@@ -863,6 +1266,7 @@ export default function App() {
   const [courses, setCourses] = useState([]);
   const [pins, setPins] = useState([]);
   const [balance, setBalance] = useState(0);
+  const [projects, setProjects] = useState([]);
   const [hydrated, setHydrated] = useState(false);
   const [mission, setMission] = useState(null); // { title, subtitle } | null
 
@@ -874,13 +1278,16 @@ export default function App() {
           STORAGE_KEYS.COURSES,
           STORAGE_KEYS.PINS,
           STORAGE_KEYS.BALANCE,
+          STORAGE_KEYS.PROJECTS,
         ]);
         const storedCourses = entries[0][1];
         const storedPins = entries[1][1];
         const storedBalance = entries[2][1];
+        const storedProjects = entries[3][1];
         if (storedCourses) setCourses(JSON.parse(storedCourses));
         if (storedPins) setPins(JSON.parse(storedPins));
         if (storedBalance) setBalance(parseFloat(storedBalance));
+        if (storedProjects) setProjects(JSON.parse(storedProjects));
       } catch (error) {
         console.warn('Failed to load saved data', error);
       } finally {
@@ -935,6 +1342,23 @@ export default function App() {
     setCourses((prev) => prev.filter((c) => c.id !== id));
   }, []);
 
+  /* ---------- project persistence ---------- */
+  useEffect(() => {
+    if (!hydrated) return;
+    AsyncStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(projects)).catch(
+      (error) => console.warn('Failed to save projects', error)
+    );
+  }, [projects, hydrated]);
+
+  /* ---------- project actions ---------- */
+  const handleAddProject = useCallback((project) => {
+    setProjects((prev) => [...prev, project]);
+  }, []);
+
+  const handleDeleteProject = useCallback((id) => {
+    setProjects((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
   /* ---------- pin actions ---------- */
   const handleAddPin = useCallback((pin) => {
     setPins((prev) => [...prev, pin]);
@@ -969,6 +1393,9 @@ export default function App() {
             onDeleteCourse={handleDeleteCourse}
             balance={balance}
             onSetBalance={setBalance}
+            projects={projects}
+            onAddProject={handleAddProject}
+            onDeleteProject={handleDeleteProject}
           />
         ) : (
           <MapScreen
@@ -1026,6 +1453,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
   },
 
+  trackerScroll: {
+    paddingBottom: 40,
+  },
+
   /* ----- loading ----- */
   loadingRoot: {
     alignItems: 'center',
@@ -1041,7 +1472,7 @@ const styles = StyleSheet.create({
   loadingSub: {
     fontFamily: HUD_FONT,
     fontSize: 14,
-    color: COLORS.neonGreen,
+    color: COLORS.textDim,
     letterSpacing: 4,
     marginTop: 8,
   },
@@ -1093,7 +1524,7 @@ const styles = StyleSheet.create({
     fontFamily: HUD_FONT,
     fontSize: 22,
     fontWeight: '900',
-    color: COLORS.moneyGreen,
+    color: COLORS.accent,
     letterSpacing: 1,
     textShadowColor: COLORS.black,
     textShadowOffset: { width: 2, height: 2 },
@@ -1120,19 +1551,19 @@ const styles = StyleSheet.create({
     fontFamily: HUD_FONT,
     fontSize: 12,
     fontWeight: '900',
-    color: COLORS.neonGreen,
+    color: COLORS.white,
     letterSpacing: 1,
   },
   hudBarTrack: {
     height: 22,
-    backgroundColor: '#121a10',
+    backgroundColor: '#161616',
     borderWidth: 2,
     borderColor: COLORS.black,
     overflow: 'hidden',
   },
   hudBarFill: {
     flex: 1,
-    backgroundColor: COLORS.groveGreen,
+    backgroundColor: COLORS.accent,
   },
   hudBarGloss: {
     position: 'absolute',
@@ -1168,7 +1599,7 @@ const styles = StyleSheet.create({
     fontFamily: HUD_FONT,
     fontSize: 11,
     fontWeight: '900',
-    color: COLORS.groveGreen,
+    color: COLORS.accent,
     letterSpacing: 2,
   },
 
@@ -1182,7 +1613,7 @@ const styles = StyleSheet.create({
     fontFamily: HUD_FONT,
     fontSize: 10,
     fontWeight: '900',
-    color: COLORS.neonGreen,
+    color: COLORS.textDim,
     letterSpacing: 3,
     marginBottom: 8,
   },
@@ -1193,7 +1624,7 @@ const styles = StyleSheet.create({
   input: {
     backgroundColor: 'rgba(0,0,0,0.55)',
     borderWidth: 1,
-    borderColor: '#2c3826',
+    borderColor: '#333330',
     color: COLORS.white,
     fontFamily: HUD_FONT,
     fontSize: 14,
@@ -1210,7 +1641,7 @@ const styles = StyleSheet.create({
   },
   addButton: {
     marginTop: 10,
-    backgroundColor: COLORS.groveGreen,
+    backgroundColor: COLORS.accent,
     borderWidth: 2,
     borderColor: COLORS.black,
     paddingVertical: 11,
@@ -1220,7 +1651,7 @@ const styles = StyleSheet.create({
     fontFamily: HUD_FONT,
     fontSize: 15,
     fontWeight: '900',
-    color: '#06140a',
+    color: '#121212',
     letterSpacing: 3,
   },
 
@@ -1238,7 +1669,7 @@ const styles = StyleSheet.create({
     fontFamily: HUD_FONT,
     fontSize: 14,
     fontWeight: '900',
-    color: COLORS.moneyGreen,
+    color: COLORS.white,
     letterSpacing: 2,
     textShadowColor: COLORS.black,
     textShadowOffset: { width: 2, height: 2 },
@@ -1275,7 +1706,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
     borderLeftWidth: 4,
-    borderLeftColor: COLORS.groveGreen,
+    borderLeftColor: '#3A3A3A',
     paddingVertical: 10,
     paddingHorizontal: 12,
     marginBottom: 6,
@@ -1302,7 +1733,7 @@ const styles = StyleSheet.create({
     fontFamily: HUD_FONT,
     fontSize: 17,
     fontWeight: '900',
-    color: COLORS.moneyGreen,
+    color: COLORS.accent,
     marginRight: 12,
     textShadowColor: COLORS.black,
     textShadowOffset: { width: 1, height: 1 },
@@ -1320,6 +1751,47 @@ const styles = StyleSheet.create({
     color: COLORS.healthRed,
     fontSize: 13,
     fontWeight: '900',
+  },
+
+  /* ----- project rows ----- */
+  projectRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.panel,
+    borderWidth: 1,
+    borderColor: COLORS.panelBorder,
+    borderLeftWidth: 4,
+    borderLeftColor: COLORS.armorGrey,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 6,
+  },
+  projectRowLeft: {
+    flex: 1,
+    marginRight: 8,
+  },
+  projectName: {
+    fontFamily: HUD_FONT,
+    fontSize: 14,
+    fontWeight: '800',
+    color: COLORS.white,
+    letterSpacing: 1,
+  },
+  projectDue: {
+    fontFamily: HUD_FONT,
+    fontSize: 9,
+    color: COLORS.textDim,
+    letterSpacing: 2,
+    marginTop: 2,
+  },
+  projectDays: {
+    fontFamily: HUD_FONT,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 1,
+    marginRight: 12,
+    minWidth: 64,
+    textAlign: 'right',
   },
 
   /* ----- mission overlay ----- */
@@ -1351,7 +1823,7 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: 'bold',
     fontStyle: 'italic',
-    color: COLORS.neonGreen,
+    color: COLORS.accent,
     marginTop: 10,
     letterSpacing: 3,
     textShadowColor: COLORS.black,
@@ -1372,86 +1844,57 @@ const styles = StyleSheet.create({
   },
 
   /* ----- map / radar ----- */
-  blip: {
-    width: 30,
-    height: 30,
+  blipFace: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    // PS2-era bevel: light catch on top/left, shadow on bottom/right.
     borderWidth: 2,
+    borderTopColor: 'rgba(255,255,255,0.55)',
+    borderLeftColor: 'rgba(255,255,255,0.55)',
+    borderBottomColor: 'rgba(0,0,0,0.45)',
+    borderRightColor: 'rgba(0,0,0,0.45)',
+  },
+  blipIcon: {
+    fontFamily: HUD_FONT,
+    fontWeight: '900',
+    color: COLORS.black,
+  },
+  busBlip: {
+    minWidth: 18,
+    height: 14,
+    paddingHorizontal: 3,
+    borderWidth: 1,
     borderColor: COLORS.black,
-    transform: [{ rotate: '45deg' }],
     alignItems: 'center',
     justifyContent: 'center',
   },
-  blipIcon: {
-    fontSize: 14,
-    transform: [{ rotate: '-45deg' }],
+  busBlipText: {
+    fontFamily: HUD_FONT,
+    fontSize: 8,
+    fontWeight: '900',
+    color: COLORS.black,
+    letterSpacing: 0.5,
+  },
+  busStopTouch: {
+    width: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  busStopDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.black,
+    opacity: 0.4,
   },
   playerIcon: {
     width: 36,
     height: 36,
     resizeMode: 'contain',
   },
-  recenterButton: {
-    position: 'absolute',
-    right: 12,
-    bottom: 12,
-    backgroundColor: COLORS.panel,
-    borderWidth: 2,
-    borderColor: COLORS.neonGreen,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-  },
-  recenterButtonText: {
-    fontFamily: HUD_FONT,
-    fontSize: 14,
-    fontWeight: '900',
-    color: COLORS.neonGreen,
-    letterSpacing: 2,
-  },
-  blipSmall: {
-    width: 10,
-    height: 10,
-    borderWidth: 1,
-    borderColor: COLORS.black,
-    transform: [{ rotate: '45deg' }],
-    marginRight: 8,
-  },
-  legend: {
-    position: 'absolute',
-    left: 12,
-    bottom: 12,
-    backgroundColor: COLORS.panel,
-    borderWidth: 2,
-    borderColor: COLORS.panelBorder,
-    padding: 10,
-    maxWidth: 250,
-  },
-  legendTitle: {
-    fontFamily: HUD_FONT,
-    fontSize: 12,
-    fontWeight: '900',
-    color: COLORS.hudGold,
-    letterSpacing: 2,
-    marginBottom: 8,
-  },
-  legendRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 5,
-  },
-  legendLabel: {
-    fontFamily: HUD_FONT,
-    fontSize: 10,
-    color: COLORS.white,
-    letterSpacing: 1,
-  },
-  legendHint: {
-    fontFamily: HUD_FONT,
-    fontSize: 8,
-    color: COLORS.textDim,
-    letterSpacing: 1,
-    marginTop: 6,
-  },
-
   /* ----- waypoint modal ----- */
   modalBackdrop: {
     flex: 1,
@@ -1465,7 +1908,7 @@ const styles = StyleSheet.create({
     maxWidth: 360,
     backgroundColor: COLORS.panel,
     borderWidth: 2,
-    borderColor: COLORS.groveGreen,
+    borderColor: '#3A3A3A',
     padding: 16,
   },
   modalTitle: {
@@ -1490,21 +1933,29 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     marginBottom: 6,
   },
-  categoryOption: {
+  pinGrid: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 6,
+  },
+  pinTile: {
+    width: '23%',
+    flexGrow: 1,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.panelBorder,
-    paddingVertical: 9,
-    paddingHorizontal: 10,
-    marginBottom: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
   },
-  categoryOptionText: {
+  pinTileLabel: {
     fontFamily: HUD_FONT,
-    fontSize: 12,
+    fontSize: 9,
     fontWeight: '800',
     color: COLORS.white,
-    letterSpacing: 1,
+    letterSpacing: 0.5,
+    textAlign: 'center',
+    marginTop: 5,
   },
   modalButtonRow: {
     flexDirection: 'row',
@@ -1528,14 +1979,14 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
   modalButtonSave: {
-    backgroundColor: COLORS.groveGreen,
+    backgroundColor: COLORS.accent,
     borderColor: COLORS.black,
   },
   modalButtonSaveText: {
     fontFamily: HUD_FONT,
     fontSize: 13,
     fontWeight: '900',
-    color: '#06140a',
+    color: '#121212',
     letterSpacing: 2,
   },
 
@@ -1554,7 +2005,7 @@ const styles = StyleSheet.create({
     borderBottomColor: 'transparent',
   },
   tabButtonActive: {
-    borderBottomColor: COLORS.neonGreen,
+    borderBottomColor: COLORS.accent,
     backgroundColor: 'rgba(124,252,90,0.07)',
   },
   tabLabel: {
@@ -1565,7 +2016,7 @@ const styles = StyleSheet.create({
     letterSpacing: 4,
   },
   tabLabelActive: {
-    color: COLORS.neonGreen,
+    color: COLORS.accent,
     textShadowColor: COLORS.black,
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 1,
